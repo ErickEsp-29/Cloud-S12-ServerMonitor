@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS servidores (
+    id SERIAL PRIMARY KEY,
+    url TEXT NOT NULL UNIQUE,
+    estado VARCHAR(20) DEFAULT 'pending',
+    tiempoRespuesta INTEGER,
+    ultimoCheck TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
