@@ -1,0 +1,56 @@
+services:
+
+  servicio-c:
+    image: melaniecubillas/servicio-c-monitor:latest
+    platform: linux/amd64        # ← esto fuerza compatibilidad
+    container_name: servicio-c
+    environment:
+      POSTGRES_DB: server_monitor
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5432:5432"
+    networks:
+      - red-monitor
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d server_monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  servicio-b:
+    build: ./servicio-b
+    platform: linux/amd64        # ← esto fuerza compatibilidad
+    container_name: servicio-b
+    environment:
+      DB_HOST: servicio-c
+      DB_PORT: 5432
+      DB_NAME: server_monitor
+      DB_USER: admin
+      DB_PASSWORD: admin123
+    ports:
+      - "4000:4000"
+    depends_on:
+      servicio-c:
+        condition: service_healthy
+    networks:
+      - red-monitor
+    restart: on-failure
+
+  servicio-a:
+    image: erickespinoza/servicio-a-monitor:latest
+    platform: linux/amd64        # ← esto fuerza compatibilidad
+    container_name: servicio-a
+    environment:
+      SERVICIO_B_URL: http://servicio-b:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - servicio-b
+    networks:
+      - red-monitor
+    restart: on-failure
+
+networks:
+  red-monitor:
+    driver: bridge

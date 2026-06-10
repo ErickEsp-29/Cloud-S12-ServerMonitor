@@ -9,7 +9,7 @@ app.use(express.static('public'));
 
 // Redirigir /api/* al Servicio B (procesamiento)
 app.use('/api', createProxyMiddleware({
-  target: 'http://servicio-b:4000',
+  target: 'http://servicio-b:8000',
   changeOrigin: true,
   on: {
     error: (err, req, res) => {

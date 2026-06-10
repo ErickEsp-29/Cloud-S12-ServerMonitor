@@ -20,9 +20,12 @@ def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def close_connection(connection) -> None:
-    if connection:
-        connection.close()
+def close_connection(conn, cursor=None):
+    """Cierra el cursor y la conexión de forma segura."""
+    if cursor:
+        cursor.close()
+    if conn:
+        conn.close()
 
 
 @contextmanager

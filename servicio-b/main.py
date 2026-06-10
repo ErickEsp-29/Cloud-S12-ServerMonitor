@@ -1,107 +1,148 @@
-from datetime import datetime
-from time import perf_counter
-from typing import Any, Dict, List, Optional
-
-import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
+import requests as http_requests
+import time
+from psycopg2.extras import RealDictCursor
+from database import get_connection, close_connection
 
-from database import (
-    get_all_servers,
-    initialize_database,
-    insert_server_url,
-    update_server_status,
-)
-
-
-app = FastAPI(
-    title="Servicio B - Monitor de Servidores",
-    description="API de monitoreo y procesamiento para URLs registradas.",
-    version="1.0.0",
-)
+app = FastAPI(title="Servicio B - Monitor de URLs")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-class MonitorRequest(BaseModel):
-    url: HttpUrl
-
-
-def serialize_server(server: Dict[str, Any]) -> Dict[str, Any]:
-    """Convierte fechas de PostgreSQL a JSON compatible."""
-    serialized = dict(server)
-    for field in ("ultimoCheck", "fechaRegistro"):
-        value = serialized.get(field)
-        if isinstance(value, datetime):
-            serialized[field] = value.isoformat()
-    return serialized
-
-
-def check_url(url: str) -> Dict[str, Optional[int] | str]:
-    start_time = perf_counter()
-    try:
-        requests.get(url, timeout=5)
-        elapsed_ms = int((perf_counter() - start_time) * 1000)
-        return {"estado": "UP", "tiempoRespuesta": elapsed_ms}
-    except requests.RequestException:
-        elapsed_ms = int((perf_counter() - start_time) * 1000)
-        return {"estado": "DOWN", "tiempoRespuesta": elapsed_ms}
-
-
-@app.on_event("startup")
-def startup() -> None:
-    initialize_database()
-
-
-@app.post("/monitor")
-def register_url(payload: MonitorRequest) -> Dict[str, str]:
-    url = str(payload.url)
-    try:
-        created = insert_server_url(url)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Error al registrar la URL") from exc
-
-    if not created:
-        return {"message": "URL ya registrada"}
-
-    return {"message": "URL registrada correctamente"}
-
-
-@app.get("/servers")
-def list_servers() -> List[Dict[str, Any]]:
-    try:
-        servers = get_all_servers()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Error al listar servidores") from exc
-
-    return jsonable_encoder([serialize_server(server) for server in servers])
-
-
-@app.post("/check")
-def run_monitoring() -> Dict[str, Any]:
-    try:
-        servers = get_all_servers()
-        for server in servers:
-            result = check_url(server["url"])
-            update_server_status(
-                server["url"],
-                str(result["estado"]),
-                int(result["tiempoRespuesta"]) if result["tiempoRespuesta"] is not None else None,
-            )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Error al ejecutar monitoreo") from exc
-
-    return {"checked": len(servers), "success": True}
+class URLInput(BaseModel):
+    url: str
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
+def health():
     return {"service": "Servicio B", "status": "OK"}
+
+
+@app.get("/api/estado")
+def listar_servidores():
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM servidores ORDER BY id")
+        rows = cursor.fetchall()
+        resultado = []
+        for row in rows:
+            r = dict(row)
+            if r.get("ultimocheck"):
+                r["ultimoCheck"] = r.pop("ultimocheck").isoformat()
+            if r.get("tiemporespuesta") is not None:
+                r["tiempoRespuesta"] = r.pop("tiemporespuesta")
+            resultado.append(r)
+        cursor.close()
+        return resultado
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.post("/api/agregar")
+def agregar_url(data: URLInput):
+    if not data.url.startswith("http"):
+        return {"ok": False, "error": "URL inválida. Debe comenzar con http:// o https://"}
+
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM servidores WHERE url = %s", (data.url,))
+        if cursor.fetchone():
+            cursor.close()
+            return {"ok": False, "error": "Esta URL ya está registrada"}
+
+        cursor.execute("INSERT INTO servidores (url) VALUES (%s)", (data.url,))
+        conn.commit()
+        cursor.close()
+
+        # Primer chequeo inmediato
+        try:
+            inicio = time.time()
+            http_requests.get(data.url, timeout=5)
+            tiempo_ms = int((time.time() - inicio) * 1000)
+            estado = "up"
+        except Exception:
+            tiempo_ms = 0
+            estado = "down"
+
+        cursor2 = conn.cursor()
+        cursor2.execute(
+            "UPDATE servidores SET estado = %s, tiemporespuesta = %s, ultimocheck = NOW() WHERE url = %s",
+            (estado, tiempo_ms, data.url)
+        )
+        conn.commit()
+        cursor2.close()
+        return {"ok": True, "message": "Servidor agregado correctamente"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.delete("/api/eliminar")
+def eliminar_url(data: URLInput):
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM servidores WHERE url = %s", (data.url,))
+        conn.commit()
+        cursor.close()
+        return {"ok": True, "message": "Servidor eliminado"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.post("/check")
+def ejecutar_chequeo():
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT url FROM servidores")
+        servidores = cursor.fetchall()
+        cursor.close()
+
+        for servidor in servidores:
+            url = servidor["url"]
+            try:
+                inicio = time.time()
+                http_requests.get(url, timeout=5)
+                tiempo_ms = int((time.time() - inicio) * 1000)
+                estado = "up"
+            except Exception:
+                tiempo_ms = 0
+                estado = "down"
+
+            c = conn.cursor()
+            c.execute(
+                "UPDATE servidores SET estado = %s, tiemporespuesta = %s, ultimocheck = NOW() WHERE url = %s",
+                (estado, tiempo_ms, url)
+            )
+            c.close()
+
+        conn.commit()
+        return {"checked": len(servidores), "success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
